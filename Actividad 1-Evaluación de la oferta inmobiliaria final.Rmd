@@ -1,0 +1,549 @@
+---
+title: "Evaluación de la oferta inmobiliaria urbana"
+author: "Oscar Mauricio Montaño"
+#date: "2025-10-03"
+output: 
+  html_document:
+    theme: spacelab            # Puedes cambiar por: flatly, yeti, lumen, journal, etc.
+    toc: true               # Activa la tabla de contenido
+    toc_depth: 3            # Niveles de encabezado incluidos (### máximo)
+    toc_float: 
+      collapsed: false      # Muestra el TOC desplegado al inicio
+      smooth_scroll: true   # Desplazamiento suave
+      position: left        # Coloca el navegador en el lado izquierdo
+    number_sections: true   # Numera secciones (1, 1.1, 1.2, etc.)
+    code_folding: show      # Permite ocultar/mostrar bloques de código
+    df_print: paged         # Paginación para data frames grandes
+---
+
+::: {style="text-align: center; margin-top:30px"}
+<img src="Imagen_cali.avif" width="60%"/>
+:::
+
+## Problema
+
+Una empresa inmobiliaria líder en una gran ciudad está buscando comprender en profundidad el mercado de viviendas urbanas para tomar decisiones estratégicas más informadas. La empresa posee una base de datos extensa que contiene información detallada sobre diversas propiedades residenciales disponibles en el mercado. Se requiere realizar un análisis holístico de estos datos para identificar patrones, relaciones y segmentaciones relevantes que permitan mejorar la toma de decisiones en cuanto a la compra, venta y valoración de propiedades.
+
+## Análisis exploratorio
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+library(paqueteMODELOS)
+library(tidyverse)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+library(factoextra)
+library(FactoMineR)
+library(gridExtra)
+library(corrplot)
+```
+
+### Tipo de datos de las variables
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+data("vivienda")
+df <- vivienda
+
+#dplyr::glimpse(df)
+
+tabla_glimpse <- data.frame(
+  Variable = names(df),
+  Tipo = sapply(df, function(x) class(x)[1]),
+  Ejemplo = sapply(df, function(x) {
+    paste(head(x, 3), collapse = ", ")
+  }),
+  row.names = NULL
+)
+tabla_glimpse %>%
+  knitr::kable("html", booktabs = TRUE,
+               caption = "<span style='font-size:13pt; font-weight:bold;'>Tabla 1. Resumen del tipo de dato</span>") %>%
+  kable_styling(full_width = FALSE,
+                position = "center",
+                bootstrap_options = c("striped", "hover")) %>%
+  column_spec(1, bold = TRUE, width = "8cm") %>%
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+
+```
+
+### Resumen del set de datos
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+
+tabla_summary <- df %>%
+  select(-id, -longitud, -latitud) %>%        # eliminar id si existe
+  select(where(is.numeric)) %>%    # SOLO numéricas
+  summarise(
+    across(
+      everything(),
+      list(
+        N = ~sum(!is.na(.x)),
+        Min = ~min(.x, na.rm = TRUE),
+        `1st Qu.` = ~quantile(.x, 0.25, na.rm = TRUE),
+        Median = ~median(.x, na.rm = TRUE),
+        Mean = ~mean(.x, na.rm = TRUE),
+        `3rd Qu.` = ~quantile(.x, 0.75, na.rm = TRUE),
+        Max = ~max(.x, na.rm = TRUE)
+      ),
+      .names = "{.col}__{.fn}"     # separador seguro
+    )
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = c("Variable", ".value"),
+    names_pattern = "(.*)__(.*)"
+  ) %>%
+  select(Variable, N, Min, `1st Qu.`, Median, Mean, `3rd Qu.`, Max)
+# Ordenar columnas (Variable, N, resto)
+tabla_summary <- tabla_summary %>%
+  select(Variable, N, Min, `1st Qu.`, Median, Mean, `3rd Qu.`, Max)
+
+tabla_summary %>%
+  knitr::kable("html", booktabs = TRUE,
+               caption = "<span style='font-size:13pt; font-weight:bold;'>Tabla 2. Resumen de estadísticas descriptivas de variables numéricas</span>") %>%
+  kable_styling(full_width = FALSE,
+                position = "center",
+                bootstrap_options = c("striped", "hover")) %>%
+  column_spec(1, bold = TRUE, width = "8cm") %>%
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+
+
+```
+
+### Valores faltantes
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+tabla_na <- df %>%
+  select(-any_of("id")) %>%
+  summarise(
+    across(
+      everything(),
+      ~sum(is.na(.x))
+    )
+  ) %>%
+  t() %>%
+  as.data.frame()
+
+tabla_na <- tabla_na %>%
+  tibble::rownames_to_column("Variable") %>%
+  rename(N_Faltantes = V1) %>%   # <- aquí el cambio
+  mutate(
+    Total = nrow(df),
+    Porcentaje_NA = round((N_Faltantes / Total) * 100, 2)
+  )
+
+
+tabla_na %>%
+  kable("html", booktabs = TRUE,
+        caption = "<span style='font-size:13pt; font-weight:bold;'>Tabla 3. Valores faltantes por variable</span>",
+        digits = 2) %>%
+  kable_styling(full_width = FALSE,
+                position = "center",
+                bootstrap_options = c("striped", "hover")) %>%
+  column_spec(1, bold = TRUE, width = "5cm") %>%
+  row_spec(0, bold = TRUE, background = "#f2f2f2")
+
+
+
+```
+
+De acuerdo con la tabla 3, las variables con más valores faltantes son: piso y parqueaderos. La variable piso no se considerará para el presente estudio ya que presenta 31.70 % de valores faltantes frente al total de registros, y no se tiene una idea clara de qué tipo de técnica de imputación se podría utilizar.
+
+### Matriz de Correlaciones
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+#Elimino valores faltantes en la columna zona (3)
+df_sin_zona <- df %>%
+  filter(!is.na(zona))
+
+df_num <- df_sin_zona %>%
+  select(where(is.numeric), -latitud, -longitud,-id, -estrato)
+
+matriz_cor <- cor(df_num, use = "complete.obs", method = "pearson")
+
+# Ajustar márgenes (más espacio abajo)
+par(mar = c(3, 1, 2, 1))
+
+corrplot(
+  matriz_cor,
+  method = "color",        # colores
+  type = "upper",          # solo triángulo superior (más limpio)
+  addCoef.col = "black",   # números dentro de las celdas
+  tl.col = "black",        # color de etiquetas
+  tl.srt = 45,             # rotar nombres de variables
+  number.cex = 0.7,        # tamaño de los números
+  col = colorRampPalette(c("blue", "white", "red"))(200), # paleta
+  diag = FALSE
+)
+
+```
+
+**Figura 1.0 Correlaciones de Pearson. Azul = relación negativa, rojo = positiva. Solo variables numéricas**
+
+De acuerdo con la figura 1, la variable preciom presenta correlaciones cercanas al 70 % con las variables: área construida, parqueaderos y baños, por lo que se vislumbran como variables influyentes en el precio de la vivienda, y por tanto deben tenerse en cuenta dentro del presente estudio.
+
+### Histograma de precios
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+ggplot(df, aes(x = preciom)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  labs(
+    title = "Distribución del precio de las viviendas",
+    x = "Precio",
+    y = "Frecuencia",
+    caption = "Figura 2.0 Distribución del precio de la oferta inmobiliaria."
+  ) +
+  theme_minimal() +
+  theme(
+    plot.caption = element_text(
+      hjust = 0.5,
+      face = "italic",
+      size = 10
+    )
+  )
+
+```
+
+La figura 2 muestra la distribución de los precios de las viviendas. En esta se observa una distribución asimétrica con cola hacia la derecha, evidencia de precios muy altos que podrían considerarse como atípicos estadísticamente, pero plausibles en lo que respecta a este tipo de estudios inmobiliarios. La mayor concentración de observaciones se localiza en el rango de 100 a 400 unidades monetarias, con una frecuencia máxima superior a 1,200 viviendas.
+
+### Precio vs Zona
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+ggplot(df, aes(x = zona, y = preciom)) +
+  geom_boxplot(fill = "skyblue") +
+  labs(
+    title = "Distribución del precio de las viviendas por zonas",
+    x = "Zona",
+    y = "Precio",
+    caption = "Figura 3.0 Distribución del precio de acuerdo con la zona"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.caption = element_text(
+      hjust = 0.5,
+      face = "italic",
+      size = 10
+    )
+  )
+
+```
+
+De acuerdo con la figura 3, se observa lo siguiente:
+
+-   la Zona Oeste exhibe la mediana más alta (aproximadamente 600 unidades) y el rango intercuartílico (IQR) más amplio, indicando mayor heterogeneidad en la oferta y precios generalmente superiores.
+
+-   Zona Oriente presenta la mediana más baja (alrededor de 200 unidades) y la menor dispersión, sugiriendo un mercado más homogéneo y accesible.
+
+-   Zona Centro, Norte y Sur muestran medianas similares (200-300 unidades) con dispersiones comparables.
+
+Lo anterior permite vislumbrar una fuerte influencia de la variable zona respecto del precio de las viviendas, por eso será incluida.
+
+### Precio vs Área Construida por tipo de viviendas
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+ggplot(df, aes(x = areaconst, y = preciom, color = tipo)) +
+  geom_point(alpha = 0.5) +
+   labs(
+    title = "Precio vs Área Construida por tipo de vivienda",
+    x = "Área (m2)",
+    y = "Precio",
+    caption = "Figura 4.0. Diagrama de dispersión: Precio vs Área construida por tipo de vivienda"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.caption = element_text(
+      hjust = 0.5,
+      face = "italic",
+      size = 10
+    )
+  )
+
+```
+
+La figura 4.0 evidencia una relación positiva entre el área construida y el precio, aunque con una dispersión creciente a medida que aumenta el tamaño del inmueble, lo que sugiere la influencia de factores adicionales como el estrato y la ubicación. Se observa una clara segmentación por tipo de vivienda: los apartamentos se concentran en áreas menores y precios medios, mientras que las casas dominan el segmento de mayor tamaño y presentan mayor heterogeneidad de precios. Asimismo, se identifican valores atípicos que podrían corresponder a propiedades de lujo (precios muy altos con áreas reducidas) o inconsistencias en los datos (precios bajos para viviendas con áreas muy grandes), lo que justifica la aplicación de técnicas de detección de outliers.
+
+### Precio vs Número de habitaciones
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+ggplot(df, aes(x = factor(habitaciones), y = preciom)) +
+  geom_boxplot(outlier.alpha = 0.3, fill = "skyblue") +
+  labs(
+    title = "Precio vs Número de habitaciones",
+    x = "habitaciones",
+    y = "Precio",
+    caption = "Figura 5.0. Boxplot: Precio vs Número de habitaciones"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.caption = element_text(
+      hjust = 0.5,
+      face = "italic",
+      size = 10
+    )
+  )
+
+```
+
+Al revisar los precios de viviendas de acuerdo con el número de habitaciones (figura 5.0), es preciso afirmar que las viviendas con 1 y 2 habitaciones son las de menor valor de la precio (mediana), sin embargo, se observan muchos valores extremos entre 2 y 7 habitaciones. Esto se podría explicar por:
+
+-   Mayor variedad de calidad y ubicación.
+
+-   Influencia de estrato y área construida.
+
+-   Segmento de lujo más diverso.
+
+### Precio vs Estrato
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+ggplot(df, aes(x = factor(estrato), y = preciom)) +
+  geom_boxplot(outlier.alpha = 0.3, fill = "skyblue") +
+ labs(
+    title = "Precio vs Estrato",
+    x = "Estrato",
+    y = "Precio",
+    caption = "Figura 6.0. Boxplot: Precio vs Estrato"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.caption = element_text(
+      hjust = 0.5,
+      face = "italic",
+      size = 10
+    )
+  )
+
+```
+
+La figura 6.0 refleja la influencia importante del estrato en el precio de la vivienda. Los estratos 5 y 6 presentan los precios más altos. Es preciso mencionar que en todos los estratos se evidencian valores atípicos que pueden ser plausibles por la heterogeneidad de viviendas.
+
+### Precio por ubicación geográfica y estrato
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+ggplot(df, aes(x = longitud, y = latitud,
+               color = estrato,
+               size = preciom)) +
+  geom_point(alpha = 0.6) +
+  scale_size_continuous(
+    range = c(1, 6),          # puntos pequeños → grandes bien diferenciados
+    name = "Precio"
+  ) +
+  labs(
+    title = "Precio por ubicación geográfica",
+    x = "Latitud",
+    y = "Longitud",
+    caption = "Figura 7.0. Precio por ubicación geográfica y estrato"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.caption = element_text(
+      hjust = 0.5,
+      face = "italic",
+      size = 10
+    )
+  )
+
+```
+
+La figura 7.0 muestra que las viviendas de mayor precio (estratos: 5 y 6) se encuentran en el sur, oriente y occidente. En la zona centro se observa mayor heterogenidad de precios, esto se puede justificar por la variedad del tipo de vivienda: edificios, casas y apartamentos.
+
+## Transformación de datos
+
+Se decide eliminar los registros 8320, 8321 y 8322, ya que no se tiene suficiente información.
+
+![Figura 8.0. Registros eliminados del dataset](registro%20eliminados.PNG)
+
+Adicionalmente, se transforman a tipo factor las siguientes variables: parqueaderos, piso, zona, tipo y barrio. Finalmente, los valores faltantes de estas variables categóricas, se llenan como "No informado".
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+#df_sin_zona
+
+df_piso_parq <- df_sin_zona %>%
+  mutate(
+    piso = ifelse(is.na(piso), "No informado", piso),
+    parqueaderos = ifelse(is.na(parqueaderos), "No informado", parqueaderos),
+    piso = as.factor(piso),
+    parqueaderos = as.factor(parqueaderos),
+    zona   = as.factor(zona),
+    tipo   = as.factor(tipo),
+    barrio = as.factor(barrio)
+    )
+
+```
+
+## Análisis de Componentes Principales (ACP)
+
+### Círculo de correlaciones del Análisis de Componentes Principales (PCA)
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+id_vector <- df_piso_parq$id
+
+df_sin_coord <- df_piso_parq %>%
+  select(-longitud, -latitud)
+
+pca_model_FactorM <- PCA(
+  df_sin_coord %>% select(-id), 
+  ncp = 5,
+  quali.sup = which(sapply(df_sin_coord %>% select(-id), is.factor)),
+  scale.unit = TRUE,
+  graph = FALSE
+)
+
+var <- get_pca_var(pca_model_FactorM)
+
+corrplot::corrplot(var$cos2, is.corr=FALSE)
+fviz_pca_var(pca_model_FactorM, col.var = "cos2",
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), 
+             repel = TRUE # Avoid text overlapping
+)
+
+```
+
+**Figura 8.0. Círculo de correlaciones del Análisis de Componentes Principales (PCA)**
+
+La figura 8 muestra que el primer componente principal está asociado al nivel general del inmueble, integrando variables de tamaño (área construida, número de baños y habitaciones), precio y estrato socioeconómico. El segundo componente diferencia entre viviendas de mayor número de habitaciones y aquellas de mayor estrato, lo que sugiere la existencia de tipologías distintas dentro del mercado inmobiliario, como viviendas familiares amplias y propiedades de alto valor en estratos superiores con menor número de habitaciones. La proximidad entre las variables de área construida y número de baños evidencia una alta correlación positiva, indicando que los inmuebles de mayor tamaño tienden a contar con más servicios.
+
+### Explícación de la varianza total
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+fviz_eig(pca_model_FactorM, addlabels = TRUE)
+
+```
+
+**Figura 9.0. Explicación de la varianza**
+
+La figura 9 muestra que el 82.5 % de la varianza, se explica a través de las dos primeras dimensiones, por lo que solo se tendrán en cuenta estas para el análisis.
+
+### Contribuciones individuales de la dimensión 1
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+fviz_contrib(pca_model_FactorM,choice = "ind", axes=1, top = 10)
+
+```
+
+**Figura 10. Contribuciones individuales de la dimensión 1**
+
+### Contribuciones individuales de la dimensión 2
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+fviz_contrib(pca_model_FactorM,choice = "ind", axes=2, top = 10)
+
+```
+
+**Figura 11. Contribuciones individuales de la dimensión 2**
+
+En las figuras 11 y 12 se observan las contribuciones individuales (10) para las dimensiones 1 y 2.
+
+## Análisis de Conglomerados
+
+### Clúster
+
+Para este apartado se usa la función: HCPC (Hierarchical Clustering on Principal Components), de la librería FactoMineR, la cual combina reducción de dimensionalidad mediante PCA con clustering jerárquico y una optimización posterior por partición. El número de clusters se determinó automáticamente (nb.clust = -1) con base en la ganancia de inercia, permitiendo identificar segmentos homogéneos del mercado inmobiliario sin imponer una estructura previa.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+Cluster_viviendas <- HCPC(pca_model_FactorM,nb.clust=-1)
+
+fviz_cluster(Cluster_viviendas,respel = T)#para generar gráfico de cluster.
+
+```
+
+**Figura 12. Clúster generados por la librería FactoMineR**
+
+### Clúster por variables cuantitativas
+
+Tabla 4. Descripción de cada clúster por variables cuantitativas
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+
+Cluster_viviendas$desc.var$quanti
+
+```
+
+El análisis de conglomerados (Figura 12, tabla 4) permitió identificar tres segmentos claramente diferenciados en el mercado inmobiliario. El primer cluster corresponde a viviendas de bajo valor, caracterizadas por menor área construida, menor número de baños y habitaciones y ubicadas en estratos socioeconómicos bajos. El segundo cluster representa el mercado medio, con viviendas de tamaño y precio moderado, orientadas a hogares familiares. El tercer cluster agrupa propiedades de alta gama, con mayor área construida, más servicios y ubicadas en estratos altos, presentando precios significativamente superiores al promedio. Las diferencias entre los clusters son estadísticamente significativas, lo que confirma la existencia de una estructura segmentada en la oferta inmobiliaria urbana.
+
+### Análisis de Correspondencia
+
+Al realizar el análisis entre zona y tipo, solo surge una dimensión, por lo que se decide realizar un análisis tridimensional entre: zona, tipo y estrato.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+
+df_cuali <- df_sin_coord %>%
+  mutate(estrato = factor(estrato))%>%
+  select(zona, tipo, estrato)
+
+res_MCA <- MCA(df_cuali, graph = FALSE)
+
+fviz_mca_biplot(
+  res_MCA,
+  repel = TRUE,
+  invisible = "ind",   # oculta los 8319 puntos
+  col.var = "red",     # categorías en rojo
+  pointsize = 3,
+  labelsize = 4,
+  title = "Mapa factorial - MCA: Zona, Tipo y Estrato"
+) +
+  theme_minimal()
+
+```
+
+**Figura 13. Análisis de correspondencias múltiples**
+
+El análisis de correspondencias múltiples (figura 13) evidencia una asociación entre el tipo de inmueble, la zona y el estrato socioeconómico. Se observa que los apartamentos se concentran principalmente en zonas del sur con estratos medios (4 y 5), mientras que las casas presentan mayor presencia en las zonas norte, centro y oriente, asociadas a estratos medios y bajos. La zona oeste se relaciona con el estrato 6, lo que sugiere una concentración de viviendas de alto nivel socioeconómico en esta área. Estos resultados confirman la existencia de una especialización territorial de la oferta inmobiliaria y complementan la segmentación identificada mediante el análisis de conglomerados.
+
+## Conclusiones
+
+1.  El mercado está claramente segmentado en tres niveles: económico, medio y premium.
+
+2.  El tamaño y los servicios explican más el precio que el estrato solo. El estrato influye, pero el valor real lo define el producto físico.
+
+3.  El mercado medio es el más relevante en volumen. Es el segmento con mayor número de propiedades de perfil familiar.
+
+4.  El segmento premium es pequeño pero de alto margen. Ideal para inversión exclusiva y proyectos diferenciados.
+
+5.  Existe zonificación del valor inmobiliario. Las zonas no son intercambiables, Oriente y Centro, precios altos. Sur y norte, mercado medio bajo. Esto impacta en la decisión de comprar viviendas o lotes.
+
+
+## Recomendaciones para la empresa inmobiliaria
+
+1. Priorizar proyectos en segmento medio, mayor liquidez.
+
+2. Mantener portafolio premium para rentabilidad.
+
+3. Evitar sobreoferta en segmento bajo sin estrategia de volumen.
+
+## Conclusión final
+
+El análisis multivariado evidenció una estructura segmentada del mercado inmobiliario urbano en tres niveles claramente diferenciados: económico, medio y premium. El valor de los inmuebles está determinado principalmente por el tamaño y la dotación (baños y habitaciones), más que por el estrato de forma aislada. Asimismo, se identificaron patrones espaciales que vinculan zonas específicas con determinados niveles socioeconómicos y tipologías de vivienda.
+
+Estos hallazgos permiten a la empresa optimizar su portafolio, focalizar la inversión en el segmento medio como motor de liquidez, desarrollar proyectos premium en zonas de alto valor y estructurar modelos de valoración basados en atributos físicos del inmueble, generando una ventaja competitiva en la toma de decisiones estratégicas.
+
+## Anexos
+
+### Dataset depurado
+
+El dataset depurado contiene 8.319 registros y variables estructurales del inmueble, incluyendo atributos físicos, socioeconómicos y espaciales. La tabla 5 permite explorar de forma interactiva la información utilizada en los análisis multivariados.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+DT::datatable(df_piso_parq,
+              options = list(pageLength = 10),
+               caption = "Tabla 5. Dataset depurado")
+
+```
+
