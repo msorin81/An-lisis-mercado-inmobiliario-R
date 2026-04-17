@@ -1,6 +1,8 @@
 # Analisis de la Oferta Inmobiliaria Urbana
 ### Analisis Multivariado con R: PCA + Clustering + MCA
 
+🔗 [Ver análisis completo aquí](https://msorin81.github.io/An-lisis-mercado-inmobiliario-R/Actividad-1-Evaluaci%C3%B3n-de-la-oferta-inmobiliaria_final.html)
+
 ![R](https://img.shields.io/badge/R-4.x-blue)
 ![RMarkdown](https://img.shields.io/badge/RMarkdown-Reporte-lightgrey)
 ![FactoMineR](https://img.shields.io/badge/FactoMineR-PCA_Clustering-green)
